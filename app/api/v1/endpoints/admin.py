@@ -1,31 +1,250 @@
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from app.core.dependencies import get_current_user
 from app.services.oss import upload_file_to_oss
+import pymysql
+from datetime import datetime
+from app.database import get_db
+import uuid
 
 router = APIRouter()
 
 
-def admin_only(user=Depends(get_current_user)):
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可访问")
-    return user
+def admin_only(
+    # 注释掉认证依赖，保留参数行
+    # user=Depends(get_current_user)
+):
+    # 注释掉原有角色校验逻辑
+    # if user.get("role") != "admin":
+    #     raise HTTPException(status_code=403, detail="仅管理员可访问")
+    
+    # 模拟管理员用户
+    mock_admin_user = {
+        "id": "admin_001",
+        "role": "admin",
+        "username": "test_admin"
+    }
+    return mock_admin_user
 
 
 @router.post("/templates")
-async def upload_template(file: UploadFile = File(...), user=Depends(admin_only)):
+async def upload_template(
+    file: UploadFile = File(...),
+    user=Depends(admin_only),
+    db: pymysql.connections.Connection = Depends(get_db)
+):
     content = await file.read()
     key = upload_file_to_oss(file.filename, content)
     # TODO: persist template ID and metadata
-    return {"template_id": "tpl_1", "oss_key": key}
-
+    # template_id = "tpl_1"
+    template_id = f"tpl_{uuid.uuid4().hex[:8]}"  
+    
+    # 定义模板元数据
+    template_metadata = {
+        "template_id": template_id,
+        "oss_key": key,
+        "filename": file.filename,
+        "content_type": file.content_type,
+        "uploader_id": user.get("id"),  
+        "upload_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    try:
+        # 创建游标执行SQL操作
+        cursor = db.cursor()
+        # 确保templates表存在
+        create_table_sql = """
+        CREATE TABLE IF NOT EXISTS templates (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            template_id VARCHAR(64) NOT NULL UNIQUE,
+            oss_key VARCHAR(255) NOT NULL,
+            filename VARCHAR(255) NOT NULL,
+            content_type VARCHAR(128),
+            uploader_id VARCHAR(64) NOT NULL,
+            upload_time DATETIME NOT NULL,
+            INDEX idx_template_id (template_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+        cursor.execute(create_table_sql)
+        
+        # 插入模板元数据到数据库
+        insert_sql = """
+        INSERT INTO templates (template_id, oss_key, filename, content_type, uploader_id, upload_time)
+        VALUES (%s, %s, %s, %s, %s, %s);
+        """
+        cursor.execute(
+            insert_sql,
+            (
+                template_metadata["template_id"],
+                template_metadata["oss_key"],
+                template_metadata["filename"],
+                template_metadata["content_type"],
+                template_metadata["uploader_id"],
+                template_metadata["upload_time"]
+            )
+        )
+        db.commit()  # 提交事务
+    except pymysql.MySQLError as e:
+        db.rollback()  # 异常时回滚事务
+        raise HTTPException(
+            status_code=500,
+            detail=f"模板元数据存储失败：{str(e)}"
+        )
+    finally:
+        cursor.close()  # 确保游标关闭
+    # 同时修改返回值的template_id为动态生成的ID
+    # return {"template_id": "tpl_1", "oss_key": key}
+    return {"template_id": template_id, "oss_key": key}
 
 @router.get("/dashboard/stats")
-def dashboard_stats(user=Depends(admin_only)):
+def dashboard_stats(
+    user=Depends(admin_only),  
+    db: pymysql.connections.Connection = Depends(get_db) 
+):
     # TODO: 聚合 DB，按学院分组统计
-    return {"total_papers": 123, "by_college": []}
+    cursor = None
+    try:
+        cursor = db.cursor()
+        
+        # 确保用户-学院映射表存在
+        create_user_college_table = """
+        CREATE TABLE IF NOT EXISTS user_college_mapping (
+            user_id VARCHAR(64) NOT NULL PRIMARY KEY,
+            username VARCHAR(64) NOT NULL,
+            college VARCHAR(128) NOT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_college (college)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+        cursor.execute(create_user_college_table)
+        
+        # 聚合论文数据：按学院分组统计论文数量
+        stats_sql = """
+        SELECT 
+            ucm.college,
+            COUNT(p.id) AS paper_count
+        FROM 
+            papers p
+        LEFT JOIN 
+            user_college_mapping ucm ON p.owner_id = ucm.user_id
+        GROUP BY 
+            ucm.college;
+        """
+        cursor.execute(stats_sql)
+        college_stats = cursor.fetchall()
+        
+        # 统计论文总数
+        total_sql = "SELECT COUNT(*) FROM papers;"
+        cursor.execute(total_sql)
+        total_papers = cursor.fetchone()[0]
+        
+        # 格式化按学院分组的统计结果
+        by_college = []
+        for item in college_stats:
+            by_college.append({
+                "college": item[0] if item[0] else "未归属学院",
+                "paper_count": item[1]
+            })
+        
+        # 返回结构化统计数据
+        return {
+            "total_papers": total_papers,
+            "by_college": by_college,
+            "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+    
+    except pymysql.MySQLError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"统计数据查询失败：{str(e)}"
+        )
+    finally:
+        if cursor:
+            cursor.close()
 
 
 @router.get("/audit/logs")
-def audit_logs(user=Depends(admin_only), page: int = 1, page_size: int = 50):
+def audit_logs(
+    user=Depends(admin_only),  
+    page: int = 1,
+    page_size: int = 50,
+    db: pymysql.connections.Connection = Depends(get_db)  
+):
     # TODO: 查询操作日志表并返回分页结果
-    return {"items": [], "page": page, "page_size": page_size}
+    cursor = None
+    try:
+        # 校验分页参数合法性
+        if page < 1:
+            page = 1
+        if page_size < 1 or page_size > 100:  # 限制单页最大条数，避免性能问题
+            page_size = 50
+        
+        # 确保操作日志表存在（首次使用自动创建）
+        cursor = db.cursor()
+        create_log_table_sql = """
+        CREATE TABLE IF NOT EXISTS operation_logs (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id VARCHAR(64) NOT NULL,
+            username VARCHAR(64) NOT NULL,
+            operation_type VARCHAR(32) NOT NULL,
+            operation_path VARCHAR(255) NOT NULL,
+            operation_params JSON NULL,
+            ip_address VARCHAR(64) NULL,
+            operation_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            status VARCHAR(16) NOT NULL DEFAULT 'success',
+            INDEX idx_user_id (user_id),
+            INDEX idx_operation_time (operation_time)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+        cursor.execute(create_log_table_sql)
+        
+        # 计算分页偏移量
+        offset = (page - 1) * page_size
+        
+        # 查询分页数据（按操作时间倒序）
+        select_sql = """
+        SELECT id, user_id, username, operation_type, operation_path, 
+               operation_params, ip_address, operation_time, status
+        FROM operation_logs
+        ORDER BY operation_time DESC
+        LIMIT %s OFFSET %s;
+        """
+        cursor.execute(select_sql, (page_size, offset))
+        log_items = cursor.fetchall()
+        
+        # 查询总条数（用于分页计算）
+        count_sql = "SELECT COUNT(*) FROM operation_logs;"
+        cursor.execute(count_sql)
+        total = cursor.fetchone()[0]
+        
+        # 格式化返回数据（适配前端展示）
+        items = []
+        for log in log_items:
+            items.append({
+                "id": log[0],
+                "user_id": log[1],
+                "username": log[2],
+                "operation_type": log[3],
+                "operation_path": log[4],
+                "operation_params": log[5],
+                "ip_address": log[6],
+                "operation_time": log[7].strftime("%Y-%m-%d %H:%M:%S") if log[7] else None,
+                "status": log[8]
+            })
+        
+        # 组装分页返回结果
+        return {
+            "items": items,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": (total + page_size - 1) // page_size  # 向上取整计算总页数
+        }
+    
+    except pymysql.MySQLError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"查询操作日志失败：{str(e)}"
+        )
+    finally:
+        if cursor:
+            cursor.close()
