@@ -1,4 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from pydantic import BaseModel
 from app.core.dependencies import get_current_user
 from app.core.security import decode_access_token, create_access_token 
 from app.models.document import DocumentRecord  
@@ -12,7 +13,28 @@ from app.database import get_connection
 router = APIRouter()
 
 
-@router.post("/import")
+class GroupCreate(BaseModel):
+    """创建群组请求体"""
+
+    group_id: str
+    group_name: str
+    teacher_id: str | None = None
+    description: str | None = None
+
+
+class GroupMember(BaseModel):
+    """群组成员增删请求体"""
+
+    member_id: int
+    member_type: str  # 学生 student / 教师 teacher / 管理员 admin
+    role: str = "member"  # 成员 member / 管理员 admin
+
+
+@router.post(
+    "/import",
+    summary="导入群组与师生关系",
+    description="上传 TSV/CSV 文件批量导入群组及师生关系"
+)
 async def import_groups(
     file: UploadFile = File(...),
     #current_user=Depends(get_current_user),
@@ -59,15 +81,19 @@ async def import_groups(
         delimiter = '\t' if file.filename.lower().endswith('.tsv') else ','  
         
         try:
-            text_content = content.decode('utf-8', errors='ignore')
-        except Exception as e:
-            raise Exception(f"文件内容解码失败：{str(e)}")
+            text_content = content.decode('utf-8-sig')  # 自动处理UTF-8 BOM
+        except UnicodeDecodeError:
+            try:
+                text_content = content.decode('gbk')  # 尝试GBK编码
+            except UnicodeDecodeError:
+                raise Exception("文件编码不支持，请使用UTF-8或GBK编码保存文件")
         
         lines = [line.strip() for line in text_content.split('\n') if line.strip()]
         if not lines:
             raise Exception("文件无有效文本内容")
         
         headers = [h.strip() for h in lines[0].split(delimiter) if h.strip()]
+        logger.info(f"解析到的表头: {headers}")
         missing_cols = required_cols - set(headers)
         if missing_cols:
             logger.error(f"用户{current_user['username']}上传文件缺少必填列：{missing_cols}")
@@ -104,47 +130,60 @@ async def import_groups(
         conn = get_connection()
         cursor = conn.cursor()
         try:
-            # 创建文件存储表
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS uploaded_files (
-                id INT PRIMARY KEY AUTO_INCREMENT,
-                filename VARCHAR(255) NOT NULL,
-                content_type VARCHAR(100) NOT NULL,
-                content LONGBLOB NOT NULL,  # 存文件二进制内容
-                operated_by VARCHAR(50) NOT NULL,
-                operated_time DATETIME NOT NULL
-            )
-            """)
-            # 插入上传的文件
-            cursor.execute("""
-            INSERT INTO uploaded_files (filename, content_type, content, operated_by, operated_time)
-            VALUES (%s, %s, %s, %s, %s)
-            """, (file.filename, file.content_type, content, current_user["username"], datetime.now()))
+            # 插入或更新群组
+            for item in import_data:
+                cursor.execute("""
+                    INSERT INTO `groups` (`group_id`, `group_name`, `teacher_id`, `description`)
+                    VALUES (%s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE `group_name`=VALUES(`group_name`), `teacher_id`=VALUES(`teacher_id`), `description`=VALUES(`description`)
+                """, (item["group_id"], item["group_name"], item["teacher_id"], None))
+                
+                # 插入或更新教师
+                cursor.execute("""
+                    INSERT INTO `teachers` (`teacher_id`, `name`)
+                    VALUES (%s, %s)
+                    ON DUPLICATE KEY UPDATE `name`=VALUES(`name`)
+                """, (item["teacher_id"], item["teacher_id"]))  # 假设name就是teacher_id，如果有更好数据可以改
+                
+                # 插入或更新学生
+                cursor.execute("""
+                    INSERT INTO `students` (`student_id`, `name`)
+                    VALUES (%s, %s)
+                    ON DUPLICATE KEY UPDATE `name`=VALUES(`name`)
+                """, (item["student_id"], item["student_name"]))
+                
+                # 获取学生ID
+                cursor.execute("SELECT `id` FROM `students` WHERE `student_id` = %s", (item["student_id"],))
+                student_row = cursor.fetchone()
+                if student_row:
+                    student_id = student_row[0]
+                    # 插入群组成员
+                    cursor.execute("""
+                        INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `role`)
+                        VALUES (%s, %s, 'student', 'member')
+                        ON DUPLICATE KEY UPDATE `is_active`=1, `role`=VALUES(`role`)
+                    """, (item["group_id"], student_id))
+                
+                # 获取教师ID并添加为成员
+                cursor.execute("SELECT `id` FROM `teachers` WHERE `teacher_id` = %s", (item["teacher_id"],))
+                teacher_row = cursor.fetchone()
+                if teacher_row:
+                    teacher_id = teacher_row[0]
+                    cursor.execute("""
+                        INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `role`)
+                        VALUES (%s, %s, 'teacher', 'admin')
+                        ON DUPLICATE KEY UPDATE `is_active`=1, `role`=VALUES(`role`)
+                    """, (item["group_id"], teacher_id))
+            
             conn.commit()
-            logger.info(f"文件{file.filename}已存入数据库")
+            logger.info(f"成功导入{imported_count}条师生关系数据")
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"数据库操作失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"数据存储失败：{str(e)}")
         finally:
             cursor.close()
             conn.close()
-        
-        # 实例化 DocumentRecord
-        document_record = DocumentRecord(
-            id=hash(f"{file.filename}_{datetime.now()}_{current_user['username']}"),
-            filename=file.filename,
-            content=content,
-            content_type=file.content_type,
-            created_at=datetime.now()
-        )
-        
-        # 日志记录文件存储信息
-        logger.info(f"用户{current_user['username']}上传文件已生成记录：{document_record.filename}（ID：{document_record.id}）")
-        
-        # 师生关系数据日志记录
-        for item in import_data:
-            logger.info(f"待绑定师生关系：教师{item['teacher_id']}-学生{item['student_id']}（群组：{item['group_id']}）")
-        
-        # 6. 审计日志：操作留痕
-        log_content = f"用户{current_user['username']}批量导入师生关系：成功识别{imported_count}条有效数据，涉及群组{','.join(group_ids)}，上传文件已存档"
-        logger.success(log_content)
     
     except HTTPException:
         raise
@@ -161,3 +200,211 @@ async def import_groups(
         "uploaded_file": file.filename,
         "file_format": file.filename.lower().split('.')[-1],
     }
+
+
+@router.post(
+    "/create",
+    summary="创建群组",
+    description="新增单个群组记录"
+)
+async def create_group(payload: GroupCreate, current_user: dict = {"roles": ["admin"], "username": "test_user"}):
+    required_roles = {"admin", "manager"}
+    if not required_roles & set(current_user.get("roles", [])):
+        raise HTTPException(status_code=403, detail="无创建群组权限，请联系管理员")
+
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        insert_sql = (
+            "INSERT INTO `groups` (`group_id`, `group_name`, `teacher_id`, `description`) "
+            "VALUES (%s, %s, %s, %s)"
+        )
+        cursor.execute(
+            insert_sql,
+            (
+                payload.group_id.strip(),
+                payload.group_name.strip(),
+                payload.teacher_id.strip() if payload.teacher_id else None,
+                payload.description.strip() if payload.description else None,
+            ),
+        )
+        conn.commit()
+        return {
+            "group_id": payload.group_id,
+            "group_name": payload.group_name,
+            "teacher_id": payload.teacher_id,
+            "description": payload.description,
+            "message": "群组创建成功",
+        }
+    except pymysql.err.IntegrityError:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail="群组编号已存在")
+    except pymysql.MySQLError as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"数据库错误：{str(e)}")
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        conn.close()
+
+
+@router.delete(
+    "/{group_id}",
+    summary="删除群组",
+    description="根据群组编号删除群组及其所有成员关系"
+)
+async def delete_group(group_id: str, current_user: dict = {"roles": ["admin"], "username": "test_user"}):
+    required_roles = {"admin", "manager"}
+    if not required_roles & set(current_user.get("roles", [])):
+        raise HTTPException(status_code=403, detail="无删除群组权限，请联系管理员")
+
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT `id` FROM `groups` WHERE `group_id` = %s", (group_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="群组不存在")
+
+        # 删除群组成员关系
+        cursor.execute("DELETE FROM `group_members` WHERE `group_id` = %s", (group_id,))
+        # 删除群组
+        cursor.execute("DELETE FROM `groups` WHERE `group_id` = %s", (group_id,))
+        conn.commit()
+        return {"group_id": group_id, "message": "群组及其成员关系已删除"}
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"数据库错误：{str(e)}")
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        conn.close()
+
+
+@router.post(
+    "/{group_id}/members",
+    summary="添加群组成员",
+    description="为指定群组添加成员（学生/教师/管理员）"
+)
+async def add_group_member(group_id: str, payload: GroupMember, current_user: dict = {"roles": ["admin"], "username": "test_user"}):
+    logger.info(f"添加成员请求: group_id={group_id}, payload={payload.dict()}")
+    required_roles = {"admin", "manager"}
+    if not required_roles & set(current_user.get("roles", [])):
+        logger.warning(f"无权限添加成员: {current_user}")
+        raise HTTPException(status_code=403, detail="无添加成员权限，请联系管理员")
+
+    if payload.member_type not in ["student", "teacher", "admin"]:
+        logger.warning(f"无效member_type: {payload.member_type}")
+        raise HTTPException(status_code=400, detail="成员类型必须是student、teacher或admin")
+
+    if payload.role not in ["member", "admin"]:
+        logger.warning(f"无效role: {payload.role}")
+        raise HTTPException(status_code=400, detail="角色必须是member或admin")
+
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT 1 FROM `groups` WHERE `group_id` = %s", (group_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="群组不存在")
+
+        # 检查成员是否存在
+        table_map = {"student": "`students`", "teacher": "`teachers`", "admin": "`admins`"}
+        table = table_map[payload.member_type]
+        cursor.execute(f"SELECT 1 FROM {table} WHERE `id` = %s", (payload.member_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail=f"{payload.member_type} ID {payload.member_id} 不存在")
+
+        cursor.execute(
+            """
+            INSERT INTO `group_members` (`group_id`, `member_id`, `member_type`, `role`)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE `is_active` = 1, `role` = VALUES(`role`)
+            """,
+            (group_id, payload.member_id, payload.member_type, payload.role),
+        )
+        conn.commit()
+        return {
+            "group_id": group_id,
+            "member_id": payload.member_id,
+            "member_type": payload.member_type,
+            "role": payload.role,
+            "message": "成员已添加/更新",
+        }
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"数据库错误：{str(e)}")
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        conn.close()
+
+
+@router.delete(
+    "/{group_id}/members",
+    summary="删除群组成员",
+    description="从指定群组移除成员（软删除，设置 is_active=0）"
+)
+async def remove_group_member(group_id: str, payload: GroupMember, current_user: dict = {"roles": ["admin"], "username": "test_user"}):
+    required_roles = {"admin", "manager"}
+    if not required_roles & set(current_user.get("roles", [])):
+        raise HTTPException(status_code=403, detail="无删除成员权限，请联系管理员")
+
+    if payload.member_type not in ["student", "teacher", "admin"]:
+        raise HTTPException(status_code=400, detail="成员类型必须是student、teacher或admin")
+
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT 1 FROM `groups` WHERE `group_id` = %s", (group_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="群组不存在")
+
+        cursor.execute(
+            """
+            SELECT 1 FROM `group_members` 
+            WHERE `group_id` = %s AND `member_id` = %s AND `member_type` = %s AND `is_active` = 1
+            """,
+            (group_id, payload.member_id, payload.member_type),
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="成员不在该群组或已被移除")
+
+        cursor.execute(
+            """
+            UPDATE `group_members` 
+            SET `is_active` = 0 
+            WHERE `group_id` = %s AND `member_id` = %s AND `member_type` = %s
+            """,
+            (group_id, payload.member_id, payload.member_type),
+        )
+        conn.commit()
+        return {
+            "group_id": group_id,
+            "member_id": payload.member_id,
+            "member_type": payload.member_type,
+            "message": "成员已移除",
+        }
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"数据库错误：{str(e)}")
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        conn.close()
