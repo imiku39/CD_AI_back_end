@@ -25,7 +25,7 @@ def parse_mysql_url(url: str) -> Dict:
 
 DEFAULT_DB_URL = os.getenv(
     "DATABASE_URL",
-    "mysql+pymysql://root:password@127.0.0.1:3306/cd_ai_db?charset=utf8mb4",
+    "mysql+pymysql://root:sbtwsj1002@127.0.0.1:3306/cd_ai_db?charset=utf8mb4",
 )
 
 

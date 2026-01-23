@@ -39,6 +39,7 @@ async def upload_template(
     content = await file.read()
     key = upload_file_to_oss(file.filename, content)
     # 待办：持久化模板 ID 及元数据
+    # 待办：持久化模板 ID 及元数据
     # template_id = "tpl_1"
     template_id = f"tpl_{uuid.uuid4().hex[:8]}"  
     
@@ -70,7 +71,9 @@ async def upload_template(
             )
         )
         db.commit()
+        db.commit()
     except pymysql.MySQLError as e:
+        db.rollback()
         db.rollback()
         raise HTTPException(
             status_code=500,
@@ -78,10 +81,96 @@ async def upload_template(
         )
     finally:
         cursor.close()
+        cursor.close()
     # 同时修改返回值的template_id为动态生成的ID
     # return {"template_id": "tpl_1", "oss_key": key}
     return {"template_id": template_id, "oss_key": key}
 
+
+@router.put(
+    "/templates/{template_id}",
+    summary="更新模板",
+    description="重新上传模板并更新元数据"
+)
+async def update_template(
+    template_id: str,
+    file: UploadFile = File(...),
+    user=Depends(admin_only),
+    db: pymysql.connections.Connection = Depends(get_db)
+):
+    content = await file.read()
+    key = upload_file_to_oss(file.filename, content)
+    upload_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    cursor = None
+    try:
+        cursor = db.cursor()
+        cursor.execute("SELECT id FROM templates WHERE template_id = %s", (template_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="模板不存在")
+
+        update_sql = """
+        UPDATE templates
+        SET oss_key = %s,
+            filename = %s,
+            content_type = %s,
+            uploader_id = %s,
+            upload_time = %s
+        WHERE template_id = %s;
+        """
+        cursor.execute(
+            update_sql,
+            (
+                key,
+                file.filename,
+                file.content_type,
+                user.get("id"),
+                upload_time,
+                template_id,
+            ),
+        )
+        db.commit()
+        return {
+            "template_id": template_id,
+            "oss_key": key,
+            "filename": file.filename,
+            "content_type": file.content_type,
+            "upload_time": upload_time,
+        }
+    except pymysql.MySQLError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"模板更新失败：{str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
+
+
+@router.delete(
+    "/templates/{template_id}",
+    summary="删除模板",
+    description="根据模板ID删除记录"
+)
+def delete_template(
+    template_id: str,
+    user=Depends(admin_only),
+    db: pymysql.connections.Connection = Depends(get_db)
+):
+    cursor = None
+    try:
+        cursor = db.cursor()
+        cursor.execute("SELECT id FROM templates WHERE template_id = %s", (template_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="模板不存在")
+
+        cursor.execute("DELETE FROM templates WHERE template_id = %s", (template_id,))
+        db.commit()
+        return {"message": "删除成功", "template_id": template_id}
+    except pymysql.MySQLError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"模板删除失败：{str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
 
 @router.put(
     "/templates/{template_id}",
@@ -177,24 +266,26 @@ def dashboard_stats(
     user=Depends(admin_only),  
     db: pymysql.connections.Connection = Depends(get_db) 
 ):
-    # 待办：聚合数据库，按学院分组统计
     cursor = None
     try:
         cursor = db.cursor()
         # 聚合论文数据：按学院分组统计论文数量
         stats_sql = """
-        SELECT 
-            ucm.college,
-            COUNT(p.id) AS paper_count
-        FROM 
-            papers p
-        LEFT JOIN 
-            user_college_mapping ucm ON p.owner_id = ucm.user_id
-        GROUP BY 
-            ucm.college;
+        SELECT p.owner_id, CASE WHEN t.id IS NOT NULL THEN COALESCE(t.department, '未知院系') WHEN s.id IS NOT NULL THEN COALESCE(s.grade, '未知年级') ELSE '未知' END AS college
+        FROM papers p
+        LEFT JOIN students s ON p.owner_id = s.id
+        LEFT JOIN teachers t ON p.owner_id = t.id;
         """
         cursor.execute(stats_sql)
-        college_stats = cursor.fetchall()
+        rows = cursor.fetchall()
+        
+        # 在 Python 中分组统计
+        from collections import defaultdict
+        college_count = defaultdict(int)
+        for owner_id, college in rows:
+            college_count[college] += 1
+        
+        college_stats = [(college, count) for college, count in college_count.items()]
         
         # 统计论文总数
         total_sql = "SELECT COUNT(*) FROM papers;"
@@ -237,6 +328,7 @@ def audit_logs(
     page_size: int = 50,
     db: pymysql.connections.Connection = Depends(get_db)  
 ):
+    # 待办：查询操作日志表并返回分页结果
     # 待办：查询操作日志表并返回分页结果
     cursor = None
     try:
