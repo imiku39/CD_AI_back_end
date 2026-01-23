@@ -1,5 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from pydantic import BaseModel
+from pydantic import BaseModel
 from app.core.dependencies import get_current_user
 from app.core.security import decode_access_token, create_access_token 
 from app.models.document import DocumentRecord  
@@ -13,6 +14,28 @@ from app.database import get_connection
 router = APIRouter()
 
 
+class GroupCreate(BaseModel):
+    """创建群组请求体"""
+
+    group_id: str
+    group_name: str
+    teacher_id: str | None = None
+    description: str | None = None
+
+
+class GroupMember(BaseModel):
+    """群组成员增删请求体"""
+
+    member_id: int
+    member_type: str  # 学生 student / 教师 teacher / 管理员 admin
+    role: str = "member"  # 成员 member / 管理员 admin
+
+
+@router.post(
+    "/import",
+    summary="导入群组与师生关系",
+    description="上传 TSV/CSV 文件批量导入群组及师生关系"
+)
 class GroupCreate(BaseModel):
     """创建群组请求体"""
 
