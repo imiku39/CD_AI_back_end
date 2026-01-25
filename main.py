@@ -30,6 +30,7 @@ openapi_tags = [
     {"name": "AI评审", "description": "AI 自动评审与报告"},
     {"name": "标注", "description": "论文标注创建与查询"},
     {"name": "管理", "description": "后台管理、模板与审计"},
+    {"name": "用户", "description": "用户创建、更新、导入与删除"},
 ]
 app.openapi_tags = openapi_tags
 

@@ -15,6 +15,7 @@ Class Design AI 后端 API 服务
 - ASGI 服务器: uvicorn ≥0.38.0
 - 文件上传: python-multipart ≥0.0.20
 - 图像处理: Pillow ≥12.0.0（可选）
+- 邮箱校验: email-validator（EmailStr 依赖）
 
 ## 项目结构
 
@@ -65,6 +66,8 @@ uv venv
 
 ```bash
 uv sync
+# 如使用 EmailStr 字段，请确保安装 email-validator
+uv pip install email-validator
 ```
 
 ### 3) 配置环境变量（必需）
@@ -149,10 +152,19 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 	- POST `/notifications/push`（信息推送，记录到操作日志）
 	- GET  `/notifications/query`（信息查询，支持按用户与分页）
 
+- 用户 Users
+	- POST `/users/`（创建用户）
+	- PUT  `/users/{user_id}`（更新用户信息）
+	- DELETE `/users/{user_id}`（删除用户）
+	- POST `/users/import`（一键导入用户，CSV/TSV）
+		- 导入文件列支持：username（必填）、email、full_name、role、password（可选；未提供则使用默认密码）
+
 ## 注意事项
 
 - 认证与权限：当前部分接口使用模拟用户，实际接入请启用 [app/core/dependencies.py](app/core/dependencies.py) 与 [app/core/security.py](app/core/security.py)。
 - 数据库：运行前必须正确配置 `DATABASE_URL`，并执行一次 `python database_setup.py` 创建/同步表结构。
+- 用户表：`database_setup.py` 会创建 `users` 表；导入/创建用户前请先执行初始化脚本。
+- 依赖：如使用 EmailStr 字段，需安装 `email-validator`，否则应用启动会报缺失模块错误。
 - 代理/网络：如通过反向代理访问，请确保 `/docs`、`/openapi.json` 可正常透传。
 
 ## 故障排查

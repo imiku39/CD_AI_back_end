@@ -2,7 +2,17 @@
 API v1 路由汇总
 """
 from fastapi import APIRouter
-from app.api.v1.endpoints import health, documents, groups, papers, ai_review, annotations, admin, notifications
+from app.api.v1.endpoints import (
+	health,
+	documents,
+	groups,
+	papers,
+	ai_review,
+	annotations,
+	admin,
+	notifications,
+	users,
+)
 
 api_router = APIRouter()
 
@@ -15,4 +25,5 @@ api_router.include_router(ai_review.router, prefix="/papers", tags=["AI评审"])
 api_router.include_router(annotations.router, prefix="/annotations", tags=["标注"])
 api_router.include_router(admin.router, prefix="/admin", tags=["管理"])
 api_router.include_router(notifications.router, prefix="/notifications", tags=["通知"])
+api_router.include_router(users.router, prefix="/users", tags=["用户"])
 

@@ -31,11 +31,6 @@ def admin_only(
     summary="上传模板",
     description="上传模板文件并存储元数据"
 )
-@router.post(
-    "/templates",
-    summary="上传模板",
-    description="上传模板文件并存储元数据"
-)
 async def upload_template(
     file: UploadFile = File(...),
     user=Depends(admin_only),
@@ -43,9 +38,6 @@ async def upload_template(
 ):
     content = await file.read()
     key = upload_file_to_oss(file.filename, content)
-    # 待办：持久化模板 ID 及元数据
-    # 待办：持久化模板 ID 及元数据
-    # template_id = "tpl_1"
     template_id = f"tpl_{uuid.uuid4().hex[:8]}"  
     
     # 定义模板元数据
@@ -76,9 +68,7 @@ async def upload_template(
             )
         )
         db.commit()
-        db.commit()
     except pymysql.MySQLError as e:
-        db.rollback()
         db.rollback()
         raise HTTPException(
             status_code=500,
@@ -86,102 +76,8 @@ async def upload_template(
         )
     finally:
         cursor.close()
-        cursor.close()
-    # 同时修改返回值的template_id为动态生成的ID
-    # return {"template_id": "tpl_1", "oss_key": key}
     return {"template_id": template_id, "oss_key": key}
 
-
-@router.put(
-    "/templates/{template_id}",
-    summary="更新模板",
-    description="重新上传模板并更新元数据"
-)
-async def update_template(
-    template_id: str,
-    file: UploadFile = File(...),
-    user=Depends(admin_only),
-    db: pymysql.connections.Connection = Depends(get_db)
-):
-    content = await file.read()
-    key = upload_file_to_oss(file.filename, content)
-    upload_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    cursor = None
-    try:
-        cursor = db.cursor()
-        cursor.execute("SELECT id FROM templates WHERE template_id = %s", (template_id,))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail="模板不存在")
-
-        update_sql = """
-        UPDATE templates
-        SET oss_key = %s,
-            filename = %s,
-            content_type = %s,
-            uploader_id = %s,
-            upload_time = %s
-        WHERE template_id = %s;
-        """
-        cursor.execute(
-            update_sql,
-            (
-                key,
-                file.filename,
-                file.content_type,
-                user.get("id"),
-                upload_time,
-                template_id,
-            ),
-        )
-        db.commit()
-        return {
-            "template_id": template_id,
-            "oss_key": key,
-            "filename": file.filename,
-            "content_type": file.content_type,
-            "upload_time": upload_time,
-        }
-    except pymysql.MySQLError as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"模板更新失败：{str(e)}")
-    finally:
-        if cursor:
-            cursor.close()
-
-
-@router.delete(
-    "/templates/{template_id}",
-    summary="删除模板",
-    description="根据模板ID删除记录"
-)
-def delete_template(
-    template_id: str,
-    user=Depends(admin_only),
-    db: pymysql.connections.Connection = Depends(get_db)
-):
-    cursor = None
-    try:
-        cursor = db.cursor()
-        cursor.execute("SELECT id FROM templates WHERE template_id = %s", (template_id,))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail="模板不存在")
-
-        cursor.execute("DELETE FROM templates WHERE template_id = %s", (template_id,))
-        db.commit()
-        return {"message": "删除成功", "template_id": template_id}
-    except pymysql.MySQLError as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"模板删除失败：{str(e)}")
-    finally:
-        if cursor:
-            cursor.close()
-
-@router.get(
-    "/dashboard/stats",
-    summary="仪表盘统计",
-    description="按学院汇总论文数量并返回总数"
-)
 
 @router.put(
     "/templates/{template_id}",
@@ -328,11 +224,6 @@ def dashboard_stats(
             cursor.close()
 
 
-@router.get(
-    "/audit/logs",
-    summary="审计日志查询",
-    description="分页查询操作日志记录"
-)
 @router.get(
     "/audit/logs",
     summary="审计日志查询",
