@@ -109,10 +109,6 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 ## 主要接口概览（/api/v1）
 
-- 健康检查
-	- GET `/health/`
-	- GET `/health/detailed`
-
 - 材料 Materials（存储与路径读取）
 	- POST `/materials/upload`
 	- PUT `/materials/{material_id}`

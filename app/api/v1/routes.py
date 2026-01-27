@@ -3,7 +3,6 @@ API v1 路由汇总
 """
 from fastapi import APIRouter
 from app.api.v1.endpoints import (
-	health,
 	documents,
 	groups,
 	papers,
@@ -17,7 +16,6 @@ from app.api.v1.endpoints import (
 api_router = APIRouter()
 
 # 注册各个端点路由
-api_router.include_router(health.router, prefix="/health", tags=["健康检查"])
 api_router.include_router(documents.router, prefix="/materials", tags=["材料"])
 api_router.include_router(groups.router, prefix="/groups", tags=["群组"])
 api_router.include_router(papers.router, prefix="/papers", tags=["论文"])
