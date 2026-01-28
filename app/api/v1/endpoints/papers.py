@@ -10,7 +10,7 @@ from app.schemas.document import (
     PaperStatusUpdate,
     VersionOut,
 )
-from app.services.oss import upload_file_to_oss
+from app.services.oss import upload_file_to_oss, upload_paper_to_storage
 from datetime import datetime
 from app.database import get_db
 import pymysql
@@ -55,8 +55,8 @@ async def upload_paper(
     if size > 100 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="文件大小超过 100MB")
 
-    # 简单 OSS 上传（返回一个 oss_key）
-    oss_key = upload_file_to_oss(file.filename, contents)
+    # 本地存储论文到 doc/essay（返回路径作为 oss_key）
+    oss_key = upload_paper_to_storage(file.filename, contents)
 
     # TODO: persist to DB, create paper record and initial version v1.0
     # 持久化到数据库：创建paper记录和初始版本v1.0
@@ -126,7 +126,7 @@ async def update_paper(
         if row[0] != current_user.get("sub"):
             raise HTTPException(status_code=403, detail="无权限更新该论文")
 
-        oss_key = upload_file_to_oss(file.filename, contents)
+        oss_key = upload_paper_to_storage(file.filename, contents)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         submitter_name = current_user.get("username") or ""
         roles = current_user.get("roles") or []
