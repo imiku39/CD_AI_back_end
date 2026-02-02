@@ -38,3 +38,12 @@ def upload_attachment_to_storage(filename: str, content: bytes) -> str:
     stored_path = ATTACHMENT_DIR / stored_name
     stored_path.write_bytes(content)
     return str(stored_path)
+
+def get_file_from_oss(oss_key: str) -> tuple:
+    """从本地存储读取文件，返回 (文件名, 文件内容)"""
+    file_path = Path(oss_key)
+    if not file_path.exists() or not file_path.is_file():
+        raise KeyError(f"文件不存在: {oss_key}")
+    content = file_path.read_bytes()
+    filename = file_path.name.split("_", 1)[1] 
+    return (filename, content)

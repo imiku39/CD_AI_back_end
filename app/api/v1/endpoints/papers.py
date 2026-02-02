@@ -1,6 +1,6 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks, Query
 from fastapi.responses import StreamingResponse
-from typing import List
+from typing import List, Optional
 import os
 import io
 from app.core.dependencies import get_current_user
@@ -12,7 +12,7 @@ from app.schemas.document import (
     PaperStatusUpdate,
     VersionOut,
 )
-from app.services.oss import upload_file_to_oss, get_file_from_oss
+from app.services.oss import upload_file_to_oss, get_file_from_oss, upload_paper_to_storage
 from datetime import datetime
 from app.database import get_db
 import pymysql
@@ -195,7 +195,6 @@ async def update_paper(
     finally:
         if cursor:
             cursor.close()
-        # db.close()
 
 
 @router.delete(
@@ -247,7 +246,6 @@ def delete_paper(
     finally:
         if cursor:
             cursor.close()
-        # db.close()
 
 
 @router.post(
@@ -338,7 +336,6 @@ def create_paper_status(
     finally:
         if cursor:
             cursor.close()
-        db.close()
 
 
 @router.put(
@@ -473,7 +470,6 @@ def update_paper_status(
     finally:
         if cursor:
             cursor.close()
-        db.close()
 
 
 @router.get(
@@ -539,8 +535,76 @@ def list_versions(
     finally:
         if cursor:
             cursor.close()
-        db.close()
     return [VersionOut(version="v1.0", size=12345, created_at="2025-01-01T00:00:00Z", status="正常")]
+
+
+@router.get(
+    "/list",
+    response_model=List[PaperOut],
+    summary="查询当前用户所有论文",
+    description="输入学生ID，仅当与登录用户ID一致时返回该学生的所有论文基础信息"
+)
+async def list_student_papers(
+    owner_id: int = Query(..., description="要查询的学生ID（论文所有者ID），必须传入且为有效整数"),
+    db: pymysql.connections.Connection = Depends(get_db),
+    current_user: Optional[str] = Query(None, description="登录用户信息(JSON字符串，包含 sub/username/roles)"),
+):
+    current_user = _parse_current_user(current_user)
+    login_user_id = current_user.get("sub", 0)  
+    current_roles = current_user.get("roles", [])
+    if not isinstance(owner_id, int) or owner_id <= 0:
+        raise HTTPException(status_code=400, detail="owner_id必须是正整数")
+    
+    cursor_check = None
+    try:
+        cursor_check = db.cursor()
+        cursor_check.execute("SELECT teacher_id FROM papers WHERE owner_id = %s LIMIT 1", (owner_id,))
+        paper_teacher_id = cursor_check.fetchone()
+        paper_teacher_id = paper_teacher_id[0] if paper_teacher_id else 0
+        
+        is_owner = (owner_id == login_user_id)
+        is_teacher = (paper_teacher_id == login_user_id)
+        is_admin = ("admin" in current_roles) or ("管理员" in current_roles)
+        
+        if not is_owner and not is_teacher and not is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail=f"无权限查询：仅可查询本人论文、本人指导的学生论文或管理员查询，传入的owner_id({owner_id})与登录用户ID({login_user_id})不一致，且非该学生的指导老师/管理员"
+            )
+    finally:
+        if cursor_check:
+            cursor_check.close()
+    
+    cursor = None
+    try:
+        cursor = db.cursor(pymysql.cursors.DictCursor) 
+        query_sql = """
+        SELECT id, owner_id, teacher_id, latest_version, oss_key, created_at, updated_at
+        FROM papers 
+        WHERE owner_id = %s 
+        ORDER BY created_at DESC
+        """
+        cursor.execute(query_sql, (owner_id,))
+        paper_records = cursor.fetchall()
+        
+        result = []
+        for record in paper_records:
+            result.append(
+                PaperOut(
+                    id=record["id"],
+                    owner_id=record["owner_id"],
+                    teacher_id=record["teacher_id"],
+                    latest_version=record["latest_version"],
+                    oss_key=record["oss_key"]
+                )
+            )
+        return result
+    
+    except pymysql.MySQLError as e:
+        raise HTTPException(status_code=500, detail=f"数据库查询失败: {str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
 
 
 @router.get(

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 import csv
 import io
 import pymysql
-from typing import List
+from typing import List, Optional 
 from pydantic import BaseModel
 from app.schemas.user import (
     StudentCreate,
@@ -18,6 +18,10 @@ from app.schemas.user import (
 from app.database import get_db
 from app.core.security import get_password_hash
 from loguru import logger
+
+class UserBindGroup(BaseModel):
+    group_id: int
+    is_bind: bool = True  
 
 router = APIRouter()
 SUPPORTED_IMPORT_EXTS = (".csv", ".tsv")
