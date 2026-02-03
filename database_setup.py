@@ -247,6 +247,20 @@ CREATE TABLE IF NOT EXISTS `paper_status_records` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='论文状态记录表';
 """
 
+DDL_MANAGEMENT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ddl_management (
+    ddlid INT PRIMARY KEY AUTO_INCREMENT COMMENT 'DDL唯一ID',
+    creator_id INT NOT NULL COMMENT '创建人ID',
+    teacher_id INT NOT NULL COMMENT '教师ID（与创建人ID一致）',
+    teacher_name VARCHAR(50) NOT NULL COMMENT '教师姓名', 
+    ddl_time DATETIME NOT NULL COMMENT '截止时间（精确到秒）',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_teacher_id (teacher_id),
+    INDEX idx_ddl_time (ddl_time),
+    INDEX idx_teacher_name (teacher_name)  -- 新增索引，优化姓名查询
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='论文DDL截止时间管理表';
+"""
+
 
 TEMPLATES_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `templates` (
