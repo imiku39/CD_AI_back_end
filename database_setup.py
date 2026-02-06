@@ -165,10 +165,8 @@ CREATE TABLE IF NOT EXISTS `group_members` (
     `detail` TEXT COMMENT '状态描述/详情',
     `operated_by` VARCHAR(64) DEFAULT NULL COMMENT '操作人',
     `operated_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '操作时间',
-    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '记录更新时间',
     PRIMARY KEY (`group_id`, `member_id`, `member_type`),
     KEY `idx_member_id` (`member_id`),
-    CONSTRAINT `fk_paper_versions_paper_id` FOREIGN KEY (`paper_id`) REFERENCES `papers` (`id`) ON DELETE CASCADE
     KEY `idx_group_id` (`group_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='群组成员关系表';
 """
