@@ -131,6 +131,30 @@ async def upload_paper(
             ),
         )
         paper_id = cursor.lastrowid
+        history_sql = """
+        INSERT INTO papers_history (
+            paper_id, version, size, status, oss_key,
+            submitted_by_id, submitted_by_name, submitted_by_role,
+            operated_by, operated_time, created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        cursor.execute(
+            history_sql,
+            (
+                paper_id,
+                version,
+                size,
+                "已上传",
+                oss_key,
+                str(submitter_id),  
+                submitter_name,
+                submitter_role,
+                submitter_name or str(submitter_id), 
+                now,
+                now
+            )
+        )
         db.commit()
     except pymysql.MySQLError as e:
         db.rollback() 
@@ -218,6 +242,30 @@ async def update_paper(
                 paper_id,
             ),
         )
+        history_sql = """
+        INSERT INTO papers_history (
+            paper_id, version, size, status, oss_key,
+            submitted_by_id, submitted_by_name, submitted_by_role,
+            operated_by, operated_time, created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        cursor.execute(
+            history_sql,
+            (
+                paper_id,
+                version,
+                size,
+                "已更新",
+                oss_key,
+                str(submitter_id),
+                submitter_name,
+                submitter_role,
+                submitter_name or str(submitter_id),
+                now,
+                now
+            )
+        )
         db.commit()
         return PaperOut(id=paper_id, owner_id=paper_owner_id, teacher_id=teacher_id, latest_version=version, oss_key=oss_key)
     except pymysql.MySQLError as e:
@@ -304,11 +352,11 @@ def create_paper_status(
     cursor = None
     try:
         cursor = db.cursor()
-        cursor.execute("SELECT owner_id, teacher_id, latest_version FROM papers WHERE id = %s", (paper_id,))
+        cursor.execute("SELECT owner_id, teacher_id, latest_version, oss_key, size FROM papers WHERE id = %s", (paper_id,))
         paper_info = cursor.fetchone()
         if not paper_info:
             raise HTTPException(status_code=404, detail="论文不存在")
-        student_id, teacher_id, version = paper_info 
+        student_id, teacher_id, version, oss_key, current_size = paper_info 
         cursor.execute(
             "SELECT status, size FROM papers WHERE id = %s",
             (paper_id,),
@@ -326,6 +374,7 @@ def create_paper_status(
                 detail=f"仅该论文的学生（ID={student_id}）可创建待审阅状态，当前登录用户ID={login_user_id}"
             )
         now = datetime.now()
+        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
         size = current_size or 0
         cursor.execute(
             """
@@ -339,10 +388,37 @@ def create_paper_status(
             (
                 status,
                 current_user.get("username") or str(login_user_id),
-                now.strftime("%Y-%m-%d %H:%M:%S"),
-                now.strftime("%Y-%m-%d %H:%M:%S"),
+                now_str,
+                now_str,
                 paper_id,
             ),
+        )
+        history_sql = """
+        INSERT INTO papers_history (
+            paper_id, version, size, status, oss_key,
+            submitted_by_id, submitted_by_name, submitted_by_role,
+            operated_by, operated_time, created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        cursor.execute("SELECT submitted_by_name, submitted_by_role FROM papers WHERE id = %s", (paper_id,))
+        origin_submit = cursor.fetchone()
+        submitter_name, submitter_role = origin_submit if origin_submit else ("", "")
+        cursor.execute(
+            history_sql,
+            (
+                paper_id,
+                version,
+                size,
+                status,
+                oss_key,
+                str(student_id), 
+                submitter_name,
+                submitter_role,
+                current_user.get("username") or str(login_user_id),  # 本次操作人
+                now_str,
+                now_str
+            )
         )
         db.commit()
         return PaperStatusOut(
@@ -388,13 +464,13 @@ def update_paper_status(
     try:
         cursor = db.cursor()
         cursor.execute(
-            "SELECT owner_id, teacher_id, latest_version FROM papers WHERE id = %s", 
+            "SELECT owner_id, teacher_id, latest_version, oss_key, size FROM papers WHERE id = %s", 
             (paper_id,)
         )
         paper_info = cursor.fetchone()
         if not paper_info:
             raise HTTPException(status_code=404, detail="论文不存在")
-        student_id, teacher_id, version = paper_info 
+        student_id, teacher_id, version, oss_key, original_size = paper_info 
         cursor.execute(
             """
             SELECT size, status FROM papers
@@ -453,6 +529,7 @@ def update_paper_status(
                 detail=f"论文最近有效状态为【{current_status}】，{role_name}仅可选择状态：{allowed_target_status}，当前选择：{status}"
             )
         now = datetime.now()
+        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute(
             """
             UPDATE papers
@@ -465,12 +542,38 @@ def update_paper_status(
             (
                 status,
                 current_user.get("username") or str(login_user_id),
-                now.strftime("%Y-%m-%d %H:%M:%S"),
-                now.strftime("%Y-%m-%d %H:%M:%S"),
+                now_str,
+                now_str,
                 paper_id,
             ),
         )
-        
+        history_sql = """
+        INSERT INTO papers_history (
+            paper_id, version, size, status, oss_key,
+            submitted_by_id, submitted_by_name, submitted_by_role,
+            operated_by, operated_time, created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        cursor.execute("SELECT submitted_by_name, submitted_by_role FROM papers WHERE id = %s", (paper_id,))
+        origin_submit = cursor.fetchone()
+        submitter_name, submitter_role = origin_submit if origin_submit else ("", "")
+        cursor.execute(
+            history_sql,
+            (
+                paper_id,
+                version,
+                original_size,
+                status,
+                oss_key,
+                str(student_id),
+                submitter_name,
+                submitter_role,
+                current_user.get("username") or str(login_user_id),  # 本次状态更新操作人
+                now_str,
+                now_str
+            )
+        )
         db.commit()
         return PaperStatusOut(
             paper_id=paper_id,
