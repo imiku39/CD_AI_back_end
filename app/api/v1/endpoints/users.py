@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Body
 import csv
 import io
 import pymysql
 from typing import List, Optional 
 from pydantic import BaseModel
+from datetime import datetime
 from app.schemas.user import (
     StudentCreate,
     TeacherCreate,
@@ -18,6 +19,57 @@ from app.schemas.user import (
 from app.database import get_db
 from app.core.security import get_password_hash
 from loguru import logger
+
+
+def _parse_current_user(current_user: Optional[str]) -> dict:
+    try:
+        if not current_user:
+            return {"sub": 0, "username": "", "roles": []}
+        import urllib.parse
+        raw = urllib.parse.unquote(current_user)
+        if not raw.strip():
+            return {"sub": 0, "username": "", "roles": []}
+        if raw.isdigit():
+            return {"sub": int(raw), "username": f"user{raw}", "roles": ["student"]}
+        import json
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {"sub": 0, "username": "", "roles": []}
+
+
+class TeacherSubmitReviewRequest(BaseModel):
+    """教师提交审阅请求"""
+    paper_id: int
+    review_content: str
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "paper_id": 1,
+                "review_content": "这篇论文写得很好，结构清晰，逻辑严谨。"
+            }
+        }
+    }
+
+
+class TeacherUpdateReviewRequest(BaseModel):
+    """教师更新审阅请求"""
+    paper_id: int
+    status: str  # 已审阅、已通过或待更新
+    review_content: Optional[str] = None
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "paper_id": 1,
+                "status": "已通过",
+                "review_content": "论文已审阅通过，建议在结论部分再做一些补充。"
+            }
+        }
+    }
 
 class UserBindGroup(BaseModel):
     group_id: int
@@ -727,6 +779,232 @@ def bind_department(
         db.rollback()
         logger.error(f"绑定院系数据库错误: {str(e)}")
         raise HTTPException(status_code=500, detail="绑定院系失败")
+    finally:
+        if cursor:
+            cursor.close()
+
+
+@router.post(
+    "/teacher/submit-review",
+    summary="教师提交审阅",
+    description="教师为论文提交审阅内容，并更新论文状态为已审阅"
+)
+def teacher_submit_review(
+    payload: TeacherSubmitReviewRequest,
+    db: pymysql.connections.Connection = Depends(get_db),
+    current_user: Optional[str] = Query('{"sub": 1, "username": "teacher1", "roles": ["teacher"]}', description="登录用户信息(JSON字符串，包含 sub/username/roles)，示例：{\"sub\":1,\"username\":\"teacher1\",\"roles\":[\"teacher\"]}"),
+):
+    current_user = _parse_current_user(current_user)
+    login_user_id = current_user.get("sub", 0)
+    login_user_roles = current_user.get("roles", [])
+    
+    if login_user_id <= 0:
+        raise HTTPException(status_code=401, detail="请先登录后再操作")
+    
+    if not ("teacher" in login_user_roles or "教师" in login_user_roles):
+        raise HTTPException(status_code=403, detail="无权限提交审阅：仅教师角色可操作")
+    
+    cursor = None
+    try:
+        cursor = db.cursor()
+        
+        cursor.execute("SELECT id, teacher_id FROM papers WHERE id = %s", (payload.paper_id,))
+        paper_row = cursor.fetchone()
+        if not paper_row:
+            raise HTTPException(status_code=404, detail=f"论文ID {payload.paper_id} 不存在")
+        
+        paper_db_id, paper_teacher_id = paper_row
+        if paper_teacher_id != 0 and paper_teacher_id != login_user_id:
+            raise HTTPException(
+                status_code=403,
+                detail=f"无权限提交审阅：论文ID {payload.paper_id} 关联的教师ID为 {paper_teacher_id}，当前登录教师ID为 {login_user_id}"
+            )
+        
+        now = datetime.now()
+        review_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        
+        cursor.execute("SELECT owner_id, latest_version, oss_key, size, status FROM papers WHERE id = %s", (payload.paper_id,))
+        paper_info = cursor.fetchone()
+        student_id, version, oss_key, original_size, current_status = paper_info
+        
+        cursor.execute(
+            """
+            UPDATE papers
+            SET status = %s,
+                detail = %s,
+                operated_by = %s,
+                operated_time = %s,
+                updated_at = %s
+            WHERE id = %s
+            """,
+            (
+                "已审阅",
+                payload.review_content,
+                current_user.get("username") or str(login_user_id),
+                review_time_str,
+                review_time_str,
+                payload.paper_id,
+            ),
+        )
+        
+        history_sql = """
+        INSERT INTO papers_history (
+            paper_id, version, size, status, detail, oss_key,
+            submitted_by_id, submitted_by_name, submitted_by_role,
+            operated_by, operated_time, created_at, updated_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        cursor.execute("SELECT submitted_by_name, submitted_by_role FROM papers WHERE id = %s", (payload.paper_id,))
+        origin_submit = cursor.fetchone()
+        submitter_name, submitter_role = origin_submit if origin_submit else ("", "")
+        cursor.execute(
+            history_sql,
+            (
+                payload.paper_id,
+                version,
+                original_size,
+                "已审阅",
+                payload.review_content,
+                oss_key,
+                str(student_id),
+                submitter_name,
+                submitter_role,
+                current_user.get("username") or str(login_user_id),
+                review_time_str,
+                review_time_str,
+                review_time_str
+            )
+        )
+        
+        db.commit()
+        
+        return {
+            "message": "审阅内容提交成功，论文状态已更新为已审阅",
+            "paper_id": payload.paper_id,
+            "teacher_id": login_user_id,
+            "review_time": review_time_str,
+            "review_content": payload.review_content,
+            "status": "已审阅"
+        }
+    
+    except pymysql.MySQLError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"提交审阅失败：数据库操作错误 - {str(e)}")
+    finally:
+        if cursor:
+            cursor.close()
+
+
+@router.post(
+    "/teacher/update-review",
+    summary="教师更新审阅",
+    description="教师更新论文审阅内容，并可更新论文状态为已审阅、已通过或待更新"
+)
+def teacher_update_review(
+    payload: TeacherUpdateReviewRequest,
+    db: pymysql.connections.Connection = Depends(get_db),
+    current_user: Optional[str] = Query('{"sub": 1, "username": "teacher1", "roles": ["teacher"]}', description="登录用户信息(JSON字符串，包含 sub/username/roles)，示例：{\"sub\":1,\"username\":\"teacher1\",\"roles\":[\"teacher\"]}"),
+):
+    current_user = _parse_current_user(current_user)
+    login_user_id = current_user.get("sub", 0)
+    login_user_roles = current_user.get("roles", [])
+    
+    if login_user_id <= 0:
+        raise HTTPException(status_code=401, detail="请先登录后再操作")
+    
+    if not ("teacher" in login_user_roles or "教师" in login_user_roles):
+        raise HTTPException(status_code=403, detail="无权限更新审阅：仅教师角色可操作")
+    
+    allowed_statuses = ["已审阅", "已通过", "待更新"]
+    if payload.status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail=f"状态必须是以下之一：{', '.join(allowed_statuses)}")
+    
+    cursor = None
+    try:
+        cursor = db.cursor()
+        
+        cursor.execute("SELECT id, teacher_id FROM papers WHERE id = %s", (payload.paper_id,))
+        paper_row = cursor.fetchone()
+        if not paper_row:
+            raise HTTPException(status_code=404, detail=f"论文ID {payload.paper_id} 不存在")
+        
+        paper_db_id, paper_teacher_id = paper_row
+        if paper_teacher_id != 0 and paper_teacher_id != login_user_id:
+            raise HTTPException(
+                status_code=403,
+                detail=f"无权限更新审阅：论文ID {payload.paper_id} 关联的教师ID为 {paper_teacher_id}，当前登录教师ID为 {login_user_id}"
+            )
+        
+        old_content = None
+        now = datetime.now()
+        update_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        
+        cursor.execute("SELECT owner_id, latest_version, oss_key, size, detail FROM papers WHERE id = %s", (payload.paper_id,))
+        paper_info = cursor.fetchone()
+        student_id, version, oss_key, original_size, old_content = paper_info
+        
+        update_fields = ["status = %s", "operated_by = %s", "operated_time = %s", "updated_at = %s"]
+        update_params = [payload.status, current_user.get("username") or str(login_user_id), update_time_str, update_time_str]
+        
+        if payload.review_content is not None:
+            update_fields.append("detail = %s")
+            update_params.append(payload.review_content)
+        
+        update_params.append(payload.paper_id)
+        
+        cursor.execute(
+            f"""
+            UPDATE papers
+            SET {', '.join(update_fields)}
+            WHERE id = %s
+            """,
+            tuple(update_params),
+        )
+        
+        history_sql = """
+        INSERT INTO papers_history (
+            paper_id, version, size, status, detail, oss_key,
+            submitted_by_id, submitted_by_name, submitted_by_role,
+            operated_by, operated_time, created_at, updated_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        cursor.execute("SELECT submitted_by_name, submitted_by_role FROM papers WHERE id = %s", (payload.paper_id,))
+        origin_submit = cursor.fetchone()
+        submitter_name, submitter_role = origin_submit if origin_submit else ("", "")
+        cursor.execute(
+            history_sql,
+            (
+                payload.paper_id,
+                version,
+                original_size,
+                payload.status,
+                payload.review_content,
+                oss_key,
+                str(student_id),
+                submitter_name,
+                submitter_role,
+                current_user.get("username") or str(login_user_id),
+                update_time_str,
+                update_time_str,
+                update_time_str
+            )
+        )
+        
+        db.commit()
+        
+        return {
+            "message": "审阅更新成功",
+            "paper_id": payload.paper_id,
+            "teacher_id": login_user_id,
+            "status": payload.status,
+            "old_review_content": old_content,
+            "new_review_content": payload.review_content,
+            "updated_time": update_time_str
+        }
+    
+    except pymysql.MySQLError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"更新审阅失败：数据库操作错误 - {str(e)}")
     finally:
         if cursor:
             cursor.close()
