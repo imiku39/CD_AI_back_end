@@ -161,7 +161,7 @@ CREATE TABLE IF NOT EXISTS `group_members` (
     `role` ENUM('member', 'admin', 'owner') NOT NULL DEFAULT 'member' COMMENT '角色：member普通成员, admin管理员, owner群主',
     `joined_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '加入时间',
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    `status` VARCHAR(32) NOT NULL COMMENT '状态（如uploaded, processing, completed等）',
+    `status` VARCHAR(32) NOT NULL DEFAULT 'active' COMMENT '状态（如uploaded, processing, completed等）',
     `detail` TEXT COMMENT '状态描述/详情',
     `operated_by` VARCHAR(64) DEFAULT NULL COMMENT '操作人',
     `operated_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '操作时间',
