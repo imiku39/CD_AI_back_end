@@ -318,6 +318,83 @@ def login_user(payload: LoginRequest, db: pymysql.connections.Connection = Depen
             cursor.close()
 
 
+class ChangePasswordRequest(BaseModel):
+    """修改密码请求"""
+    old_password: str
+    new_password: str
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "old_password": "123456",
+                "new_password": "654321Abc!"
+            }
+        }
+    }
+
+@router.put(
+    "/change-password",
+    summary="修改密码",
+    description="验证原始密码后修改用户密码，学生/教师/管理员均可操作"
+)
+def change_password(
+    payload: ChangePasswordRequest,
+    db: pymysql.connections.Connection = Depends(get_db),
+    current_user: Optional[str] = Query(None, description="登录用户信息(JSON字符串，包含 sub/username/roles)"),
+):
+    current_user = _parse_current_user(current_user)
+    user_id = current_user.get("sub")
+    if not user_id or user_id <= 0:
+        raise HTTPException(status_code=401, detail="请先登录")
+    
+    cursor = None
+    try:
+        # 解析用户类型
+        user_type = _resolve_user_type_from_payload(current_user)
+        info = USER_TABLES[user_type]
+        table = info["table"]
+        id_col = info["id_col"]
+        
+        cursor = db.cursor(pymysql.cursors.DictCursor)
+        
+        # 查询用户信息并验证原始密码
+        cursor.execute(
+            f"SELECT id, password FROM {table} WHERE id = %s",
+            (user_id,)
+        )
+        user_row = cursor.fetchone()
+        if not user_row:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        
+        # 验证原始密码
+        if not verify_password(payload.old_password, user_row["password"]):
+            raise HTTPException(status_code=400, detail="原始密码错误")
+        
+        # 验证新密码
+        if len(payload.new_password) < 6:
+            raise HTTPException(status_code=400, detail="新密码长度不能少于6位")
+        
+        # 加密新密码并更新
+        new_password_hash = get_password_hash(payload.new_password)
+        cursor.execute(
+            f"UPDATE {table} SET password = %s, updated_at = NOW() WHERE id = %s",
+            (new_password_hash, user_id)
+        )
+        db.commit()
+        
+        return {"message": "密码修改成功"}
+    
+    except HTTPException:
+        raise
+    except pymysql.MySQLError as e:
+        db.rollback()
+        logger.error(f"修改密码数据库错误: {str(e)}")
+        raise HTTPException(status_code=500, detail="密码修改失败")
+    finally:
+        if cursor:
+            cursor.close()
+
+
 @router.post(
     "/students",
     response_model=UserOut,
