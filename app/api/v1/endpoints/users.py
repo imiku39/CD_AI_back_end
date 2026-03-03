@@ -260,6 +260,7 @@ def get_current_user_info(
     description="统一账号密码登录，返回 JWT access token 和用户信息",
 )
 def login_user(payload: LoginRequest, db: pymysql.connections.Connection = Depends(get_db)):
+
     cursor = None
     try:
         cursor = db.cursor(pymysql.cursors.DictCursor)
@@ -269,8 +270,43 @@ def login_user(payload: LoginRequest, db: pymysql.connections.Connection = Depen
         if not payload.password:
             raise HTTPException(status_code=400, detail="password 不能为空")
 
-        candidates: list[tuple[str, dict]] = []
+        # 账号映射逻辑：先查映射表
+        cursor.execute(
+            "SELECT real_user_id, real_user_type FROM account_mapping WHERE virtual_account = %s",
+            (username,)
+        )
+        mapping = cursor.fetchone()
+        if mapping:
+            real_user_id = mapping["real_user_id"]
+            real_user_type = mapping["real_user_type"]
+            # 查找真实账号信息
+            info = USER_TABLES[real_user_type]
+            table = info["table"]
+            id_col = info["id_col"]
+            cursor.execute(
+                f"SELECT id, {id_col} as username, name as full_name, phone, email, role, password, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') as created_at, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') as updated_at FROM {table} WHERE id = %s",
+                (real_user_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="真实账号不存在")
+            password_hash = row.get("password")
+            if not password_hash or not verify_password(payload.password, password_hash):
+                raise HTTPException(status_code=401, detail="用户名或密码错误")
+            role = row.get("role") or real_user_type
+            token_payload = {
+                "sub": row["id"],
+                "username": row["username"],
+                "roles": [role],
+                "user_type": real_user_type,
+            }
+            access_token = create_access_token(token_payload)
+            row.pop("password", None)
+            user_out = UserOut(**row)
+            return LoginResponse(access_token=access_token, user=user_out)
 
+        # 没有映射则走原有逻辑
+        candidates: list[tuple[str, dict]] = []
         if payload.user_type:
             row = _fetch_user_for_login(cursor, username, payload.user_type)
             if row:
@@ -280,21 +316,17 @@ def login_user(payload: LoginRequest, db: pymysql.connections.Connection = Depen
                 row = _fetch_user_for_login(cursor, username, user_type)
                 if row:
                     candidates.append((user_type, row))
-
         if not candidates:
             raise HTTPException(status_code=401, detail="用户名或密码错误")
-
         matched: list[tuple[str, dict]] = []
         for user_type, row in candidates:
             password_hash = row.get("password")
             if password_hash and verify_password(payload.password, password_hash):
                 matched.append((user_type, row))
-
         if not matched:
             raise HTTPException(status_code=401, detail="用户名或密码错误")
         if len(matched) > 1:
             raise HTTPException(status_code=400, detail="账号在多个用户类型中匹配，请指定 user_type")
-
         user_type, row = matched[0]
         role = row.get("role") or user_type
         token_payload = {
@@ -304,7 +336,6 @@ def login_user(payload: LoginRequest, db: pymysql.connections.Connection = Depen
             "user_type": user_type,
         }
         access_token = create_access_token(token_payload)
-
         row.pop("password", None)
         user_out = UserOut(**row)
         return LoginResponse(access_token=access_token, user=user_out)

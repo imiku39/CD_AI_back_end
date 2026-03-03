@@ -391,7 +391,7 @@ def create_paper_status(
 ):
     """Insert a status row for a paper if it does not exist."""
     current_user = _parse_current_user(current_user)
-    login_user_id = current_user.get("sub", 0)
+    login_user_id = int(current_user.get("sub", 0))
     if login_user_id <= 0:
         raise HTTPException(status_code=401, detail="请先登录后再操作")
     status = "待审阅"
