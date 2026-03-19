@@ -625,7 +625,7 @@ def update_paper_status(
         if current_status == "已定稿":
             raise HTTPException(
                 status_code=403,
-                detail=f"论文最近有效状态为【已定稿】，不允许修改任何状态"
+                detail="论文最近有效状态为【已定稿】，不允许修改任何状态"
             )
         if status not in allowed_target_status:
             role_name = "学生" if is_student else "老师"
@@ -1670,3 +1670,4 @@ def update_ddl(
                 cursor.close()
             except Exception:
                 pass
+
