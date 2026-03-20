@@ -551,7 +551,6 @@ def user_bind_school(
     role_set = {r.strip().lower() for r in current_roles}
     if role not in role_set:
         raise HTTPException(status_code=403, detail=f"current_user中的角色({current_roles})与传入的role({role})不匹配")
-
     # 业务逻辑处理
     cursor = None
     try:
@@ -632,7 +631,6 @@ def user_bind_department(
     role_set = {r.strip().lower() for r in current_roles}
     if role not in role_set:
         raise HTTPException(status_code=403, detail=f"current_user中的角色({current_roles})与传入的role({role})不匹配")
-
     # 业务逻辑处理
     cursor = None
     try:
@@ -652,7 +650,6 @@ def user_bind_department(
         user_school = cursor.fetchone()
         if not user_school or not user_school["school_id"]:
             raise HTTPException(status_code=400, detail="请先绑定学校信息，再绑定院系")
-
         # 更新用户院系信息
         update_sql = f"""
             UPDATE {table} 
